@@ -1,0 +1,131 @@
+---
+title: "Global Terrorism Database - analiza"
+output: pdf_document
+---
+
+```{r echo=FALSE, message=FALSE}
+## Czynności przygotowawcze - załadowanie potrzebnych pakietów oraz utworzenie i wypełnienie bazy danych
+library(RSQLite)
+library(tidyverse)
+library(ggpubr)
+df <- read.csv("globalterrorismdb_0919dist.csv")
+conn <- dbConnect(RSQLite::SQLite(), "gtd.db")
+#dbWriteTable(conn, "Attacks", df)
+```
+
+# 1. Wstęp
+
+Raport zawiera analizę danych pochodzących z Global Terrorism Database (GTD) - bazy utrzymywanej przez amerykańskie National Consortium for the Study of Terrorism and Responses to Terrorism (START) na uniwersytecie Marylandu w College Park, zawierającej listę ponad 190 tys. ataków terrorystycznych od 1970 r. do końca 2018 r (pomijając rok 1993). Każdy opisany jest przez najwyżej 135 zmiennych, określających m.in datę ataku, jego lokalizację, cel, rodzaj użytej broni lub narzędzi czy ilość poszkodowanych. Pełen opis bazy znajduje się w dołączonym dokumencie 'Codebook: Inclusion Criteria and Variables'. 
+
+# 2. Analiza wstępna/eksploracyjna
+
+## 2.1 Ilość ataków rocznie wg regionu
+
+Najpierw sprawdźmy, jak ilość ataków jest uzależniona od regionu świata, pozwoli nam to stwierdzić, które miejsca są obecnie najbardziej zagrożone atakiem terrorystycznym.
+
+```{r echo=FALSE}
+tmp <- df %>% group_by(region_txt, iyear) %>% summarize(attack_count = n())
+g <- ggplot(tmp, aes(iyear, attack_count)) + geom_line() + facet_wrap(region_txt ~., nrow = 4, ncol = 3, scales = "free_y") + labs(x = "Rok") + labs(y = "Ilość ataków")
+print(g)
+```
+Na wykresie zauważyć można nagły wzrost ilości ataków na Bliskim Wschodzie i Afryce północnej, Afryce subsaharyjskiej oraz Azji południowej ok. roku 2014 - jest to najprawdopodobniej efekt wzrostu aktywności ugrupowań islamistycznych, zwłaszcza tzw. Państwa Islamskiego; widać także chwilowy wzrost ilości ataków w Europie wschodniej, co prawdopodobnie związane jest z pojawieniem się prorosyjskich ugrupowań separatystycznych na terenach wschodniej Ukrainy. W pozostałych regionach albo obserwujemy spadek, albo też ilość ataków terrorystycznych nie jest obecnie duża.
+
+## 2.2 Najaktywniejsze ugrupowania terrorystyczne w Europie Wschodniej oraz na Bliskim Wschodzie, Afryce północnej i subsaharyjskiej, i Azji południowej i połudnowo-wschodniej od roku 2010
+
+```{r echo = FALSE, fig.width=7.5,fig.height=8}
+tmp <- dbGetQuery(conn, "SELECT iyear, region_txt, gname FROM Attacks WHERE iyear >= 2010 AND (region = 9 OR
+                  region = 10 OR region = 11 OR region = 6 OR region = 5) AND NOT gname = 'Unknown'")
+tmp2 <- tmp %>% group_by(region_txt, gname) %>% summarize(attack_count = n())
+EE <- tmp2 %>% filter(region_txt == "Eastern Europe") %>% arrange(desc(attack_count)) %>% head(3) 
+ME <- tmp2 %>% filter(region_txt == "Middle East & North Africa") %>% arrange(desc(attack_count)) %>% head(3)
+SSA <- tmp2 %>% filter(region_txt == "Sub-Saharan Africa") %>% arrange(desc(attack_count)) %>% head(3)
+SEA <- tmp2 %>% filter(region_txt == "Southeast Asia") %>% arrange(desc(attack_count)) %>% head(3)
+SA <- tmp2 %>% filter(region_txt == "South Asia") %>% arrange(desc(attack_count)) %>% head(3)
+tmp3 <- rbind(EE,ME,SSA,SEA,SA) %>% mutate(Index = 4 - with_order(order_by = attack_count, fun = row_number, x = attack_count ))
+
+g <- ggplot() + geom_col(data = tmp3, aes(x = reorder(gname, Index), y = attack_count)) + facet_wrap(region_txt ~., nrow = 5, ncol = 1, scales = "free") +  labs(x = "Organizacja") + labs(y = "Ilość ataków")
+print(g)
+```
+
+Wykres potwierdza przypusczenia co do źródła ataków, pierwsze miejsca zajmują organizacje islamistyczne, w Europie wschodniej separatyści, natomiast w Azji południowo-wschodniej najwięcej ataków zorganizowała komunistyczna New People's Army z Filipin, jednak drugie i trzecie miejsce przypada organizacjom islamistycznym.
+
+## 2.3 Sumaryczna ilość ofiar (zabitych lub rannych) w zależności od zastosowanej broni
+
+```{r echo=FALSE, fig.height=4}
+tmp <- dbGetQuery(conn,"SELECT weaptype1_txt, nwound, nkill FROM Attacks WHERE success = 1 AND NOT (nwound IS NULL OR nkill IS NULL OR weaptype1_txt = 'Unknown')")
+
+tmp2 <- tmp %>% group_by(weaptype1_txt) %>% summarize(victim_count = sum(nwound, nkill))
+tmp2[11,1] <- "Vehicle"
+
+g <- ggplot(tmp2, aes(x=reorder(weaptype1_txt,-victim_count), y=victim_count)) + geom_col(aes(fill = weaptype1_txt)) + theme(axis.text.x=element_text(angle=90, hjust=1), legend.position="none") + labs(x = "Rodzaj broni") + labs(y = "Ilość ofiar") + geom_text(aes(label = victim_count), vjust = -0.1) 
+print(g)
+```
+Wzięto pod uwagę jedynie udane ataki (parametr *success* równy 1), których liczba ofiar i rodzaj użytego uzbrojenia są znane. Największą liczbę ofiar spowodowały ładnuki wybuchowe - ponad 2 razy więcej niż reszta rodzajów broni razem wzięta, co może świadczyć zarówno o skuteczności tego narzędzia jak i o popularności. Żeby to sprawdzić, należy policzyć średnią ilość ofiar na atak, a także odchylenie standardowe, co pozwoli stwierdzić jak bardzo różne efekty daje zastosowanie danego rodzaju broni.
+
+## 2.4 Średnia i odchylenie standardowe ilości ofiar w zależności od zastosowanej broni
+
+```{r echo=FALSE, fig.width=9,fig.height=4}
+tmp2 <- tmp %>% group_by(weaptype1_txt) %>% summarize(victim_count = sum(nwound, nkill), avg = mean(nwound+nkill), sd=sd(nwound+nkill)) %>% filter(victim_count > 0)
+
+tmp2[9,1] <- "Vehicle"
+
+g1 <- ggplot(tmp2, aes(x=reorder(weaptype1_txt,-avg), y=avg)) + geom_col(aes(fill = weaptype1_txt)) + theme(axis.text.x=element_text(angle=90, hjust=1), legend.position="none") + labs(x = "Rodzaj broni") + labs(y = "Średnia ilość ofiar") + geom_text(aes(label = sprintf("%0.2f", round(avg, digits = 2))), vjust = -0.1)
+
+g2 <- ggplot(tmp2, aes(x=reorder(weaptype1_txt,-avg), y=sd)) + geom_col(aes(fill = weaptype1_txt)) + theme(axis.text.x=element_text(angle=90, hjust=1), legend.position="none") + labs(x = "Rodzaj broni") + labs(y = "Odchylenie standardowe") + geom_text(aes(label = sprintf("%0.2f", round(sd, digits = 2))), vjust = -0.1, hjust= 0.4)
+
+print(ggarrange(g1,g2,ncol=2,nrow = 1))
+x <- dbGetQuery(conn,"SELECT * FROM Attacks WHERE nwound = 10878")
+```
+Wartość średniej i odchylenia standardowego dla kategorii *Vehicle* sugeruje występowanie wartości odstających w danych, zawyżających wynik na tyle, że uzyskane wartości nie pozwalają na jednoznaczne określenie relacji pomiędzy poziomami skuteczności różnych rodzajów uzbrojenia. Po przejrzeniu danych udało się znaleźć przyczynę takiego stanu rzeczy - jest to uwzględnienie informacji nt. ataku na WTC z 11.09.2001 r. Po odrzuceniu odpowiadających mu wpisów otrzymujemy:
+
+```{r echo=FALSE, fig.width=9,fig.height=4}
+tmp <- dbGetQuery(conn,"SELECT weaptype1_txt, nwound, nkill FROM Attacks WHERE success = 1 AND NOT (nwound IS NULL OR nkill IS NULL OR weaptype1_txt = 'Unknown' OR nwound = 10878)") #Ilość rannych w ataku na WTC określono na 10878 na samolot
+tmp2 <- tmp %>% group_by(weaptype1_txt) %>% summarize(victim_count = sum(nwound, nkill), avg = mean(nwound+nkill), sd=sd(nwound+nkill)) %>% filter(victim_count > 0)
+
+tmp2[9,1] <- "Vehicle"
+
+g1 <- ggplot(tmp2, aes(x=reorder(weaptype1_txt,-avg), y=avg)) + geom_col(aes(fill = weaptype1_txt)) + theme(axis.text.x=element_text(angle=90, hjust=1), legend.position="none") + labs(x = "Rodzaj broni") + labs(y = "Średnia ilość ofiar") + geom_text(aes(label = sprintf("%0.2f", round(avg, digits = 2))), vjust = -0.1)
+
+g2 <- ggplot(tmp2, aes(x=reorder(weaptype1_txt,-avg), y=sd)) + geom_col(aes(fill = weaptype1_txt)) + theme(axis.text.x=element_text(angle=90, hjust=1), legend.position="none") + labs(x = "Rodzaj broni") + labs(y = "Odchylenie standardowe") + geom_text(aes(label = sprintf("%0.2f", round(sd, digits = 2))), vjust = -0.1, hjust= 0.4)
+
+print(ggarrange(g1,g2,ncol=2,nrow = 1))
+x <- dbGetQuery(conn,"SELECT * FROM Attacks WHERE nwound = 10878")
+```
+Teraz widać, że najwyższą średnią ofiar przynoszą ataki z zastosowaniem broni chemicznej lub biologicznej, ataki przy użyciu materiałów wybuchowych są dopiero na czwartym miejscu, co oznacza, że wysoka łączna ilość ofiar ataków z zastosowaniem materiałów wybuchowych wynika jedynie z popularności tej metody ataku.
+
+# 3. Modelowanie statystyczne
+
+## 3.1 Zależność między ilością zabitych w ataku a ilością rannych
+
+```{r echo=FALSE, fig.height=3}
+tmp <- tmp %>% filter(nkill < 600) %>% filter(nwound < 2000) #odcięcie wartości odstających
+g <- ggplot(tmp, aes(nwound, nkill)) + geom_point() + geom_smooth(method = "lm") + labs(x ="Liczba rannych", y = "Liczba zabitych")
+linearModel <- lm(nkill ~ nwound, data=tmp)
+print(g)
+```
+Zauważyć można wzrost liczby zabitych przy rosnącej liczbie rannych - wytłumaczyć to można wzrostem skali ataku. Parametry prostej regresji:
+
+```{r echo=FALSE}
+summary(linearModel)
+```
+
+## 3.2 Analiza rozkładu ilości zabitych w ataku terrorystycznym
+```{r echo=FALSE, fig.height=4}
+testData <- dbGetQuery(conn,"SELECT region_txt, iyear, imonth, iday, nwound, nkill FROM Attacks WHERE success = 1 AND NOT (nwound IS NULL OR nkill IS NULL OR weaptype1_txt = 'Unknown') and nkill > 0")
+testData2 <- testData %>% group_by( nkill) %>% summarize(attack_count = n())
+g <- ggplot(testData2, aes(nkill , attack_count)) + geom_line() + labs(y = "Ilość ataków", x = "Ilość zabitych" )
+g2 <- ggplot(testData2, aes(log(nkill) , log(attack_count))) + geom_point() + geom_smooth(method = "lm", se=FALSE) + labs(y = "Logarytm ilości ataków", x = "Logarytm ilości zabitych" )
+print(ggarrange(g,g2, ncol = 2, nrow = 1))
+```
+Wykresy przedstawiają ilość ataków w zależności od liczby zabitych, przy czym wzięto pod uwagę jedynie te o niezerowej liczbie ofiar. Na drugim wykresie widać, że zaleźność między logarytmem ilości ataków a logarytmem ilości zabitych jest bliska liniowej, co sugeruje, że rozkład ilości zabitych w ataku terrorystycznym jest zgodny z prawem potęgowym (power law), czyli, że funkcja prawdopodobieństwa rozkładu ma postać $p(x) = P(X=x) = Cx^{-\alpha}$. W celu sprawdzenia dopasowania rozkładu wykorzystano pakiet *poweRlaw* i wchodzącej w jego skład funkcji *bootstrap_p*. Uzyskana w ramach testu wartość *p*:
+```{r echo=FALSE}
+library(poweRlaw)
+m <- displ$new(testData$nkill)
+m$pars <- estimate_pars(m)
+bs_p <- bootstrap_p(m, no_of_sims=100, threads=2)
+print(bs_p$p)
+```
+pozwala na przyjęcie hipotezy zerowej. Estymowana wartość parametru $\alpha$ wynosi:
+```{r echo=FALSE}
+print(m$pars)
+```
